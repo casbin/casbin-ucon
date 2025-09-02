@@ -36,24 +36,26 @@ func main() {
 
     // Add conditions
     condition := &ucon.Condition{
-        ID:   "time_condition",
-        Type: "temporal",
-        Expr: "working_hours",
+        ID:   "location_condition",
+		Name: "location",
+		Type: "always",
+		Expr: "office",
     }
     uconE.AddCondition(condition)
 
     // Add obligations
     obligation := &ucon.Obligation{
-        ID:   "log_access",
-        Type: "post",
-        Expr: "audit_log",
+        ID:   "post_log",
+		Name: "access_logging",
+		Type: "post",
+		Expr: "log_level:detailed",
     }
     uconE.AddObligation(obligation)
 
         // Create a session
     sessionID, _ := uconE.CreateSession("alice", "read", "document1", map[string]interface{}{
-        "department": "engineering",
-        "clearance":  "secret",
+        "location":      "office",
+		"log_level":     "detailed",
     })
 
     // UCON session-based enforcement
@@ -62,6 +64,13 @@ func main() {
     }else{
         // deny the request, show an error
     }
+    /*
+    ongoing access
+    */
+    
+    // Stop the seesion
+    _ = uconE.StopMonitoring(sessionID)
+
 }
 ```
 
@@ -74,14 +83,16 @@ EnforceWithSession(sessionID string) (bool, error)
 // Session management
 CreateSession(subject, action, object string, attributes map[string]interface{}) (string, error)
 GetSession(sessionID string) (*SessionImpl, error)
+UpdateSessionAttribute(sessionID string, key string, val interface{}) error
 RevokeSession(sessionID string) error
 
 // Condition  management
 AddCondition(condition *ConditionImpl) error
 EvaluateConditions(sessionID string) (bool, error)
-//obligation management
+// Obligation management
 AddObligation(obligation *ObligationImpl) error
 ExecuteObligations(sessionID string) error
+ExecuteObligationsByType(sessionID string, phase string) error
 
 // Monitoring
 StartMonitoring(sessionID string) error

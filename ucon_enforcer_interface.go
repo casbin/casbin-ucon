@@ -29,6 +29,7 @@ type IUconEnforcer interface {
 	// Session management
 	CreateSession(sub string, act string, obj string, attributes map[string]interface{}) (string, error)
 	GetSession(sessionID string) (*Session, error)
+	UpdateSessionAttribute(sessionID string, key string, val interface{}) error
 	RevokeSession(sessionID string) error
 
 	// Condition evaluation
@@ -38,6 +39,7 @@ type IUconEnforcer interface {
 	// Obligation management
 	AddObligation(obligation *Obligation) error
 	ExecuteObligations(sessionID string) error
+	ExecuteObligationsByType(sessionID string, phase string) error
 
 	// Continuous monitoring
 	StartMonitoring(sessionID string) error

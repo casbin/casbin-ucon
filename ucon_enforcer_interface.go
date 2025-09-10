@@ -24,7 +24,7 @@ type IUconEnforcer interface {
 	casbin.IEnforcer
 
 	// Enhanced enforcement with session context
-	EnforceWithSession(sessionID string) (bool, error)
+	EnforceWithSession(sessionID string) (*Session, error)
 
 	// Session management
 	CreateSession(sub string, act string, obj string, attributes map[string]interface{}) (string, error)

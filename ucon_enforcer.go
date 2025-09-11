@@ -28,23 +28,12 @@ import (
 // UconEnforcer UCON enforcer that wraps casbin.Enforcer and extends UCON functionality.
 type UconEnforcer struct {
 	*casbin.Enforcer // Embed casbin.Enforcer for backward compatibility
-	sessions         map[string]Session
+	sessions         *SessionManager
 	conditions       map[string]Condition
 	obligations      map[string]Obligation
 	monitoringActive map[string]bool // Track which sessions are being monitored
-	mu               sync.RWMutex
-}
 
-type Session struct {
-	ID      string
-	Subject string
-	Action  string
-	Object  string
-
-	Attributes map[string]interface{}
-	Active     bool
-	StartTime  time.Time
-	EndTime    time.Time
+	mu sync.RWMutex
 }
 
 type Condition struct {
@@ -63,101 +52,76 @@ type Obligation struct {
 
 // NewUconEnforcer creates a new UCON enforcer.
 func NewUconEnforcer(e *casbin.Enforcer) IUconEnforcer {
+	sm := NewSessionManager()
+
 	return &UconEnforcer{
 		Enforcer:         e,
-		sessions:         make(map[string]Session),
+		sessions:         sm,
 		conditions:       make(map[string]Condition),
 		obligations:      make(map[string]Obligation),
 		monitoringActive: make(map[string]bool),
+		mu:               sync.RWMutex{},
 	}
 }
 
 // EnforceWithSession performs enforcement with session context.
-func (u *UconEnforcer) EnforceWithSession(sessionID string) (bool, error) {
+func (u *UconEnforcer) EnforceWithSession(sessionID string) (*Session, error) {
 	// Get session information
 	session, err := u.GetSession(sessionID)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	// Check if session is active
-	if !session.Active {
-		return false, errors.New("session is not active")
+	if !session.IfActive() {
+		return nil, errors.New("session is not active")
 	}
 
 	// 1. Evaluate conditions first
 	conditionsOk, err := u.EvaluateConditions(sessionID)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if !conditionsOk {
-		return false, nil
+		return nil, nil
 	}
 
-	// 2. Execute pre-access obligations (访问前义务)
+	// 2. Execute pre-access obligations
 	err = u.ExecuteObligationsByType(sessionID, "pre")
 	if err != nil {
 		// Pre-access obligations failure should deny access
 		fmt.Printf("Error: Failed to execute pre-access obligations: %v\n", err)
-		return false, err
+		return nil, err
 	}
 
 	// 3. Perform basic Casbin policy enforcement
-	ok, err := u.Enforce(session.Subject, session.Object, session.Action)
+	ok, err := u.Enforce(session.GetSubject(), session.GetObject(), session.GetAction())
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	// 4. Start monitoring if access is granted
 	if ok {
 		// Start monitoring for ongoing obligations
 		_ = u.StartMonitoring(sessionID)
+	} else {
+		return nil, nil
 	}
-	return ok, nil
+	return session, nil
 }
 
 // CreateSession creates a new session.
 func (u *UconEnforcer) CreateSession(sub string, act string, obj string, attributes map[string]interface{}) (string, error) {
-	// Generate session ID
-	sessionID := fmt.Sprintf("session_%d", time.Now().UnixNano())
-
-	// Create session
-	session := Session{
-		ID:         sessionID,
-		Subject:    sub,
-		Action:     act,
-		Object:     obj,
-		Active:     true,
-		Attributes: attributes,
-		StartTime:  time.Now(),
-	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.sessions[sessionID] = session
-	return sessionID, nil
+	return u.sessions.CreateSession(sub, act, obj, attributes)
 }
 
 // GetSession retrieves session information.
 func (u *UconEnforcer) GetSession(sessionID string) (*Session, error) {
-	u.mu.RLock()
-	defer u.mu.RUnlock()
-	session, exists := u.sessions[sessionID]
-	if !exists {
-		return nil, errors.New("session not found")
-	}
-	return &session, nil
+	return u.sessions.GetSessionById(sessionID)
 }
 
 func (u *UconEnforcer) UpdateSessionAttribute(sessionID string, key string, val interface{}) error {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	session, exists := u.sessions[sessionID]
-	if !exists {
-		return errors.New("session not found")
-	}
-	session.Attributes[key] = val
-	u.sessions[sessionID] = session
-	return nil
+	return u.sessions.UpdateSessionAttribute(sessionID, key, val)
 }
 
 // RevokeSession revokes a session.
@@ -166,15 +130,14 @@ func (u *UconEnforcer) RevokeSession(sessionID string) error {
 	if err != nil {
 		return err
 	}
-
-	if !session.Active {
-		return errors.New("session has be closed")
+	if session.IfActive() {
+		return errors.New("session is active, cannot be revoked")
 	}
-	session.Active = false
-	session.EndTime = time.Now()
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.sessions[sessionID] = *session
+
+	if err := u.sessions.DeleteSession(sessionID); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -232,7 +195,7 @@ func (u *UconEnforcer) evaluateCondition(condition *Condition, session *Session)
 }
 
 func (u *UconEnforcer) checkLocation(expr string, session *Session) (bool, error) {
-	location, ok := session.Attributes["location"].(string)
+	location, ok := session.GetAttribute("location").(string)
 	if !ok {
 		return false, errors.New("location attribute not found or not a string")
 	}
@@ -241,7 +204,7 @@ func (u *UconEnforcer) checkLocation(expr string, session *Session) (bool, error
 }
 
 func (u *UconEnforcer) checkVipLevel(expr string, session *Session) (bool, error) {
-	vipLevel, ok := session.Attributes["vip_level"].(int)
+	vipLevel, ok := session.GetAttribute("vip_level").(int)
 	if !ok {
 		return false, fmt.Errorf("vip_level attribute not found or not an integer")
 	}
@@ -321,51 +284,52 @@ func (u *UconEnforcer) executeUserAuthentication(expr string, session *Session) 
 	key := strings.TrimSpace(parts[0])
 	expectedValue := strings.TrimSpace(parts[1])
 
-	actualValue := session.Attributes[key]
+	actualValue := session.GetAttribute(key)
 	if actualValue != expectedValue {
 		return fmt.Errorf("user %s authentication failed: %s (expected: %s, actual: %s)",
-			session.Subject, expr, expectedValue, actualValue)
+			session.GetSubject(), expr, expectedValue, actualValue)
 	}
 
-	fmt.Printf("[AUTH] User %s authentication verification passed: %s\n", session.Subject, expr)
+	fmt.Printf("[AUTH] User %s authentication verification passed: %s\n", session.GetSubject(), expr)
 	return nil
 }
 
 func (u *UconEnforcer) executeVipValidation(expr string, session *Session) error {
-	vipLevel := session.Attributes["vip_level"]
-	vipExpiry := session.Attributes["vip_expiry"]
-
-	if vipLevel == "" {
-		return fmt.Errorf("user %s is not a VIP user", session.Subject)
+	vipLevel := session.GetAttribute("vip_level")
+	vipExpiry := session.GetAttribute("vip_expiry")
+	if vipLevel == NormalStopReason {
+		return fmt.Errorf("user %s is not a VIP user", session.GetSubject())
 	}
-
 	if vipExpiry == "expired" {
-		return fmt.Errorf("user %s VIP membership has expired", session.Subject)
+		return fmt.Errorf("user %s VIP membership has expired", session.GetSubject())
 	}
 
-	fmt.Printf("[VIP] User %s VIP status is valid (level: %s)\n", session.Subject, vipLevel)
+	fmt.Printf("[VIP] User %s VIP status is valid (level: %s)\n", session.GetSubject(), vipLevel)
 	return nil
 }
 
 func (u *UconEnforcer) executeAccessLogging(expr string, session *Session) error {
-	fmt.Printf("[ACCESS LOG] %s: %s -> %s\n", expr, session.Subject, session.Object)
+	fmt.Printf("[ACCESS LOG] %s: %s -> %s\n", expr, session.GetSubject(), session.GetObject())
 	return nil
 }
 
 // StartMonitoring starts monitoring a session.
 func (u *UconEnforcer) StartMonitoring(sessionID string) error {
 	// Check if session exists
-	_, exists := u.sessions[sessionID]
-	if !exists {
+	session, err := u.GetSession(sessionID)
+	if err != nil {
 		return errors.New("session not found")
 	}
 
+	u.mu.Lock()
 	if u.monitoringActive[sessionID] {
 		return nil
 	}
-
 	u.monitoringActive[sessionID] = true
-	go u.monitorSession(sessionID)
+	u.mu.Unlock()
+
+	go u.monitorSession(session)
+	fmt.Println("[MONITOR] Monitoring started")
 
 	return nil
 }
@@ -381,61 +345,53 @@ func (u *UconEnforcer) StopMonitoring(sessionID string) error {
 		fmt.Printf("Warning: Failed to execute post-access obligations during session revocation: %v\n", err)
 	}
 
-	if err := u.RevokeSession(sessionID); err != nil {
-		fmt.Printf("Warning: Failed to revoke session: %v\n", err)
-	}
+	_ = session.Stop(NormalStopReason)
 
-	fmt.Printf("[MONITOR] Stopped monitoring session %s for %s\n", sessionID, session.Subject)
+	fmt.Printf("[MONITOR] Stopped monitoring session %s for %s\n", sessionID, session.GetSubject())
 	return nil
 }
 
 // monitorSession continuously monitors a session.
-func (u *UconEnforcer) monitorSession(sessionID string) {
+func (u *UconEnforcer) monitorSession(session *Session) {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		// Check if monitoring is still active
-		isActive := u.monitoringActive[sessionID]
+		isActive := u.monitoringActive[session.GetId()]
 		if !isActive {
 			return
 		}
 
-		session, err := u.GetSession(sessionID)
-		if err != nil {
-			fmt.Printf("[MONITOR] Error getting session %s: %v\n", sessionID, err)
-			u.monitoringActive[sessionID] = false
-			return
-		}
-		if !session.Active {
-			u.monitoringActive[sessionID] = false
+		if !session.IfActive() {
+			u.mu.Lock()
+			u.monitoringActive[session.GetId()] = false
+			u.mu.Unlock()
 			return
 		}
 
 		// Check conditions during ongoing access
-		conditionsOk, err := u.EvaluateConditions(sessionID)
+		conditionsOk, err := u.EvaluateConditions(session.GetId())
 		if err != nil {
-			fmt.Printf("[MONITOR] Error evaluating conditions for session %s: %v\n", sessionID, err)
-			continue
+			reason := fmt.Sprintf("Error evaluating conditions for session %s: %v\n", session.GetId(), err)
+			_ = session.Stop(reason)
+			return
 		}
 
 		if !conditionsOk {
-			fmt.Printf("[MONITOR] Conditions no longer met for session %s, revoking...\n", sessionID)
-			revokeErr := u.RevokeSession(sessionID)
-			if revokeErr != nil {
-				fmt.Printf("[MONITOR] Error revoking session %s: %v\n", sessionID, revokeErr)
-			}
-			u.monitoringActive[sessionID] = false
+			reason := fmt.Sprintf("Conditions no longer met for session %s, revoking...\n", session.GetId())
+			_ = session.Stop(reason)
 			return
 		}
 
 		// Execute ongoing obligations during continuous authorization
-		err = u.ExecuteObligationsByType(sessionID, "ongoing")
+		err = u.ExecuteObligationsByType(session.GetId(), "ongoing")
 		if err != nil {
-			fmt.Printf("[MONITOR] Warning: Failed to execute ongoing obligations for session %s: %v\n", sessionID, err)
-			// Continue monitoring even if ongoing obligations fail
+			reason := fmt.Sprintf("Failed to execute ongoing obligations for session %s: %v\n", session.GetId(), err)
+			_ = session.Stop(reason)
+			return
 		}
 
-		fmt.Printf("[MONITOR] Session %s is still valid\n", sessionID)
+		fmt.Printf("[MONITOR] Session %s is still valid\n", session.GetId())
 	}
 }

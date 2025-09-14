@@ -289,7 +289,7 @@ func TestSessionRefusedDuringAccess(t *testing.T) {
 	go func() {
 		for {
 			if !session.IfActive() {
-				//user can chose how to stop the session
+				//user can choose how to stop the session
 				uconE.RevokeSession(sessionID)
 				fmt.Printf("%s %s %s is stopped\n", session.GetSubject(), session.GetAction(), session.GetObject())
 				break

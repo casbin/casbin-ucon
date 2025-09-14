@@ -100,7 +100,7 @@ func TestSession(t *testing.T) {
 	// Verify session is revoked
 	session, err = uconE.GetSession(sessionID)
 	if session != nil {
-		t.Fatalf("session revoke failed: %v", err)
+		t.Fatalf("session revocation failed: %v", err)
 	}
 }
 

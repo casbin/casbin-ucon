@@ -247,7 +247,7 @@ func TestEnforceWithSession(t *testing.T) {
 				if session.GetStopReason() == NormalStopReason {
 					break
 				}
-				//the session is stoped
+				//the session is stopped
 				uconE.RevokeSession(sessionID)
 				break
 			}

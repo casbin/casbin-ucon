@@ -86,7 +86,7 @@ func TestSession(t *testing.T) {
 	// Test RevokeSession
 	err = uconE.RevokeSession(sessionID)
 	if err == nil {
-		t.Fatalf("session shuldn't be closed: %v", err)
+		t.Fatalf("session shouldn't be closed: %v", err)
 	}
 
 	_ = session.Stop(NormalStopReason)

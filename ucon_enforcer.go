@@ -297,7 +297,7 @@ func (u *UconEnforcer) executeUserAuthentication(expr string, session *Session) 
 func (u *UconEnforcer) executeVipValidation(expr string, session *Session) error {
 	vipLevel := session.GetAttribute("vip_level")
 	vipExpiry := session.GetAttribute("vip_expiry")
-	if vipLevel == NormalStopReason {
+	if vipLevel == "" {
 		return fmt.Errorf("user %s is not a VIP user", session.GetSubject())
 	}
 	if vipExpiry == "expired" {

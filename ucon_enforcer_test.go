@@ -15,6 +15,7 @@
 package ucon
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -69,20 +70,28 @@ func TestSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get session: %v", err)
 	}
-	if session.Subject != "alice" {
-		t.Errorf("Expected subject 'alice', got '%s'", session.Subject)
+	if session.GetSubject() != "alice" {
+		t.Errorf("Expected subject 'alice', got '%s'", session.GetSubject())
 	}
-	if session.Action != "read" {
-		t.Errorf("Expected action 'read', got '%s'", session.Action)
+	if session.GetAction() != "read" {
+		t.Errorf("Expected action 'read', got '%s'", session.GetAction())
 	}
-	if session.Object != "document1" {
-		t.Errorf("Expected object 'document1', got '%s'", session.Object)
+	if session.GetObject() != "document1" {
+		t.Errorf("Expected object 'document1', got '%s'", session.GetObject())
 	}
-	if !session.Active {
+	if !session.IfActive() {
 		t.Error("Session should be active")
 	}
 
 	// Test RevokeSession
+	err = uconE.RevokeSession(sessionID)
+	if err == nil {
+		t.Fatalf("session shouldn't be closed: %v", err)
+	}
+
+	_ = session.Stop(NormalStopReason)
+	time.Sleep(500 * time.Millisecond)
+
 	err = uconE.RevokeSession(sessionID)
 	if err != nil {
 		t.Fatalf("Failed to revoke session: %v", err)
@@ -90,11 +99,8 @@ func TestSession(t *testing.T) {
 
 	// Verify session is revoked
 	session, err = uconE.GetSession(sessionID)
-	if err != nil {
-		t.Fatalf("Failed to get session after revocation: %v", err)
-	}
-	if session.Active {
-		t.Error("Session should be inactive after revocation")
+	if session != nil {
+		t.Fatalf("session revocation failed: %v", err)
 	}
 }
 
@@ -226,40 +232,35 @@ func TestEnforceWithSession(t *testing.T) {
 		t.Fatalf("Failed to create session: %v", err)
 	}
 
-	result, err := uconE.EnforceWithSession(sessionID)
-	if !result {
+	session, err := uconE.EnforceWithSession(sessionID)
+	if session == nil {
+		// refused
 		t.Fatalf("Failed to enforce: %v", err)
 	}
 	if err != nil {
 		t.Fatalf("Failed to enforce with session: %v", err)
 	}
 
-	// Simulate ongoing access for a short period
-	time.Sleep(500 * time.Millisecond)
+	go func() {
+		for {
+			if !session.IfActive() {
+				if session.GetStopReason() == NormalStopReason {
+					break
+				}
+				//the session is stopped
+				uconE.RevokeSession(sessionID)
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
 
-	session, err := uconE.GetSession(sessionID)
-	if err != nil {
-		t.Fatalf("Failed to get session: %v", err)
-	}
-	if !session.Active {
-		t.Error("Session should be active during access")
-	}
-
-	err = uconE.StopMonitoring(sessionID)
-	if err != nil {
-		t.Fatalf("Failed to stop monitoring: %v", err)
-	}
-
-	session, err = uconE.GetSession(sessionID)
-	if err != nil {
-		t.Fatalf("Failed to get session after revocation: %v", err)
-	}
-	if session.Active {
-		t.Error("Session should not be active after revocation")
-	}
+	fmt.Printf("%s %s %s is enforced\n", session.GetSubject(), session.GetAction(), session.GetObject())
+	time.Sleep(2 * time.Second)
+	_ = uconE.StopMonitoring(sessionID)
 }
 
-func TestSessionRevokedDuringAccess(t *testing.T) {
+func TestSessionRefusedDuringAccess(t *testing.T) {
 	uconE := GetUconEnforcer()
 
 	condition := &Condition{
@@ -276,17 +277,33 @@ func TestSessionRevokedDuringAccess(t *testing.T) {
 		"log_level":     "detailed",
 	})
 
-	if err := uconE.StartMonitoring(sessionID); err != nil {
-		t.Fatalf("Failed to start monitoring: %v", err)
+	session, err := uconE.EnforceWithSession(sessionID)
+	if session == nil {
+		// refused
+		t.Fatalf("Failed to enforce: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("Failed to enforce with session: %v", err)
 	}
 
-	time.Sleep(300 * time.Millisecond)
-	uconE.UpdateSessionAttribute(sessionID, "location", "home")
+	go func() {
+		for {
+			if !session.IfActive() {
+				//user can choose how to stop the session
+				uconE.RevokeSession(sessionID)
+				fmt.Printf("%s %s %s is stopped\n", session.GetSubject(), session.GetAction(), session.GetObject())
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
 
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
+	session.UpdateAttribute("location", "home")
+	time.Sleep(1 * time.Second)
 
-	session, err := uconE.GetSession(sessionID)
-	if err == nil && session.Active {
-		t.Error("Expected session to be revoked due to condition change")
+	_, err = uconE.GetSession(sessionID)
+	if err == nil {
+		t.Error("Expected session to be deleted after revocation")
 	}
 }

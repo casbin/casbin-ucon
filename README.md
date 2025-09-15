@@ -131,8 +131,8 @@ func main() {
     // UCON session-based enforcement
     session, err := uconE.EnforceWithSession(sessionID)
 	if session == nil {
-        // reused
-        fmt.Println("session reused because: ",err )
+        // refused
+        fmt.Println("session refused because: ",err )
     }
 
   go func() {
